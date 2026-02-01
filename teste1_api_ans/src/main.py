@@ -38,7 +38,7 @@ def main():
         print("../data/zips/ - Arquivos ZIP baixados")
         print("../data/extraidos/ - Arquivos extraídos e filtrados")
         print("../data/output/consolidado_despesas.csv - CSV consolidado")
-        print(" ../data/output/consolidado_despesas.zip - ZIP final")
+        print("../data/output/consolidado_despesas.zip - ZIP final")
         print("="*70)
         print()
         

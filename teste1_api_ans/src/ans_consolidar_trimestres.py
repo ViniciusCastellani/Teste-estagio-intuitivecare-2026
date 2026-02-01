@@ -26,7 +26,7 @@ def calcular_valor_despesa(df):
         .str.replace(",", ".")
         .astype(float)
     )
-    df["ValorDespesas"] = df["VL_SALDO_FINAL"] - df["VL_SALDO_INICIAL"]
+    df["Valor_Despesas"] = df["VL_SALDO_FINAL"] - df["VL_SALDO_INICIAL"]
     return df
 
 
@@ -59,12 +59,12 @@ def consolidar_trimestres(pasta_csvs, pasta_saida):
         
         df_final = pd.DataFrame()
         df_final["CNPJ"] = df["REG_ANS"]
-        df_final["RazaoSocial"] = np.nan
+        df_final["Razao_Social"] = np.nan
         df_final["Trimestre"] = trimestre
         df_final["Ano"] = ano
-        df_final["ValorDespesas"] = df["ValorDespesas"]
+        df_final["Valor_Despesas"] = df["Valor_Despesas"]
         
-        valores_suspeitos = df_final["ValorDespesas"] <= 0
+        valores_suspeitos = df_final["Valor_Despesas"] <= 0
         datas_suspeitas = verificar_inconsistencia_trimestre(df, ano, trimestre)
         df_final["Suspeito"] = valores_suspeitos | datas_suspeitas
         todos.append(df_final)
