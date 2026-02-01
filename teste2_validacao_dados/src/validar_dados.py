@@ -15,7 +15,8 @@ def validar_valor_positivo(valor):
 
 def aplicar_validacoes(df):
     df["Registro_ANS_Valido"] = df["CNPJ"].apply(validar_registro_ans)
-    df["Valor_Valido"] = df["Valor_Despesas"].apply(validar_valor_positivo)
+    df["Valor_Valido"] = df["ValorDespesas"].apply(validar_valor_positivo)
+    df["RazaoSocial_Valida"] = df["RazaoSocial"].notna() & (df["RazaoSocial"].astype(str).str.strip() != "")
     df["Validacao_OK"] = df["Registro_ANS_Valido"] & df["Valor_Valido"]
     return df
 

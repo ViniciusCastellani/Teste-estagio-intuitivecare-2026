@@ -27,21 +27,22 @@ def carregar_dados(caminho):
 
 
 def preparar_dados(df):
-    df["Valor_Despesas"] = pd.to_numeric(df["Valor_Despesas"], errors = 'coerce')
+    df["ValorDespesas"] = pd.to_numeric(df["ValorDespesas"], errors = 'coerce')
     return df
 
 
-def agregar_dados(df):
-    agregados_df = df.groupby(["Razao_Social", "UF"], as_index = False)
-    
-    agregados_df = agregados_df.agg(
-        Total_Despesas = ("Valor_Despesas", "sum"),
-        Media_Despesas_Trimestre=("Valor_Despesas", "mean"),
-        Desvio_Padrao_Despesas=("Valor_Despesas", "std")
+def agregar_dados(df): 
+    por_trimestre = df.groupby(["RazaoSocial", "UF", "Trimestre"], as_index=False, dropna = False).agg(
+        Soma_Trimestre=("ValorDespesas", "sum")
     )
 
-    agregados_df = agregados_df.sort_values(by = "Total_Despesas", ascending = False)
+    agregados_df = por_trimestre.groupby(["RazaoSocial", "UF"], as_index=False, dropna=False).agg(
+        Total_Despesas=("Soma_Trimestre", "sum"),
+        Media_Despesas_Trimestre=("Soma_Trimestre", "mean"),
+        Desvio_Padrao_Despesas=("Soma_Trimestre", "std")
+    )
 
+    agregados_df = agregados_df.sort_values(by="Total_Despesas", ascending=False)
     return agregados_df
 
 
