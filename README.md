@@ -1,6 +1,8 @@
 # 1. TESTE DE INTEGRAÇÃO COM API PÚBLICA - ANS
+
 ## Como Executar
 ```bash
+cd teste1_api_ans/src
 pip install requests beautifulsoup4 pandas openpyxl
 python main.py
 ```
@@ -15,20 +17,20 @@ python main.py
 ```python
 def obter_ultimos_tres_trimestres_global():
     anos.sort(reverse=True)  # Do mais recente para o mais antigo
-for ano in anos:
-# Busca trimestres deste ano
-# Se já temos 3+, para de buscar
-if len(todos_trimestres) >= 3:
-break
-# Ordena por (ano, trimestre) e retorna os 3 primeiros
-return todos_trimestres[:3]
+    for ano in anos:
+        # Busca trimestres deste ano
+        # Se já temos 3+, para de buscar
+        if len(todos_trimestres) >= 3:
+            break
+    # Ordena por (ano, trimestre) e retorna os 3 primeiros
+    return todos_trimestres[:3]
 ```
 **Por quê?**
 - O teste pede "últimos 3 trimestres disponíveis", não "3 trimestres do último ano"
 - Se 2024 só tem 1T disponível, deve buscar 4T/2023 e 3T/2023
 - Garante sempre 3 trimestres mesmo com dados incompletos
 
-**Exemplo prático**: 
+**Exemplo prático**:
 - Ano 2024: 1T ✓
 - Ano 2023: 4T ✓, 3T ✓, 2T, 1T
 - Resultado: 1T/2024, 4T/2023, 3T/2023
@@ -48,11 +50,11 @@ return todos_trimestres[:3]
 ---
 
 ### 3. Detecção Automática de Delimitadores
-**Decisão**: Tenta delimitadores comuns `,` `;` `\t` `|`) antes de usar detecção automática.
+**Decisão**: Tenta delimitadores comuns (`,` `;` `\t` `|`) antes de usar detecção automática.
 ```python
 for sep in [',', ';', '\t', '|']:
     df = pd.read_csv(caminho, sep=sep)
-if len(df.columns) > 1: return df
+    if len(df.columns) > 1: return df
 ```
 **Por quê?** Arquivos ANS têm formatos inconsistentes entre trimestres.
 
@@ -61,7 +63,7 @@ if len(df.columns) > 1: return df
 ### 4. Identificação de Arquivos de Despesas
 **Decisão**: Busca textual por "despesa" + "evento" + "sinistro" no conteúdo do arquivo.
 
-**Por quê?** 
+**Por quê?**
 - Nomes de arquivo não seguem padrão
 - Buscar no conteúdo é mais confiável
 
@@ -75,6 +77,13 @@ if len(df.columns) > 1: return df
 **Solução**: Campo `RazaoSocial` = `NaN`
 
 **Por quê?** Os arquivos não contêm Razão Social, apenas Registro ANS. Melhor marcar como ausente que inventar dado.
+
+---
+
+### Múltiplos níveis de conta contábil
+**Solução**: Mantém todos os registros sem deduplicação.
+
+**Por quê?** Os arquivos ANS contêm dados em diferentes níveis de agregação do plano de contas (ex: 464, 4641, 46411, 464119). Cada nível é um registro válido e distinto, identificado pelo campo `CD_CONTA_CONTABIL`. Uma mesma operadora pode ter várias linhas com o mesmo valor no mesmo trimestre — isso não são duplicatas, são níveis diferentes da mesma conta. Deduplicar baseado apenas em CNPJ + valor + trimestre eliminaria registros legítimos.
 
 ---
 
@@ -98,7 +107,7 @@ df_final["Suspeito"] = valores_suspeitos | datas_suspeitas
 df["DATA"] = pd.to_datetime(df["DATA"], errors="coerce")
 inconsistencias = (df["ano_data"] != ano_arquivo) | (df["trimestre_data"] != trimestre_arquivo)
 ```
-**Por quê?** 
+**Por quê?**
 - Nome do arquivo é fonte mais confiável
 - `errors="coerce"` evita quebra do pipeline em datas inválidas
 - Não descarta dados automaticamente
@@ -111,7 +120,7 @@ inconsistencias = (df["ano_data"] != ano_arquivo) | (df["trimestre_data"] != tri
 | Coluna | Descrição |
 |--------|-----------|
 | CNPJ | Registro ANS |
-| RazaoSocial | NaN (não disponível) |
+| RazaoSocial | NaN (não disponível nesta etapa) |
 | Trimestre | 1-4 |
 | Ano | YYYY |
 | ValorDespesas | `VL_SALDO_FINAL - VL_SALDO_INICIAL` |
@@ -121,10 +130,17 @@ inconsistencias = (df["ano_data"] != ano_arquivo) | (df["trimestre_data"] != tri
 
 ## Estrutura do Código
 ```
-├── main.py                          # Pipeline completo
-├── ans_download.py                  # Download recursivo dos ZIPs
-├── ans_processar.py                 # Extração e filtragem
-└── ans_consolidar_trimestres.py    # Consolidação + flag Suspeito
+teste1_api_ans/
+├── src/
+│   ├── main.py                          # Pipeline completo
+│   ├── ans_download.py                  # Download recursivo dos ZIPs
+│   ├── ans_processar.py                 # Extração e filtragem
+│   └── ans_consolidar_trimestres.py     # Consolidação + flag Suspeito
+└── data/
+    ├── zips/                            # ZIPs baixados da ANS
+    ├── extraidos/                       # CSVs extraídos dos ZIPs
+    ├── csv_trimestres/                  # CSVs filtrados (apenas despesas eventos/sinistros)
+    └── output/                          # consolidado_despesas.csv + .zip
 ```
 
 ---
@@ -138,7 +154,7 @@ cd teste2_validacao_dados/src
 pip install requests beautifulsoup4 pandas openpyxl
 python main.py
 ```
-**Entrada**: `teste1_api_ans/data/output/consolidado_despesas.csv`  
+**Entrada**: `teste1_api_ans/data/output/consolidado_despesas.csv`
 **Saída**: `data/zip/Teste_Vinicius_Castellani_Tonello.zip`
 
 O pipeline executa 3 etapas em sequência:
@@ -156,9 +172,10 @@ O pipeline executa 3 etapas em sequência:
 ### 1. Estratégia de Validação: Flag vs. Descarte
 **Decisão**: Registros inválidos são **mantidos** com flags booleanas, nunca descartados.
 ```python
-df["Registro_ANS_Valido"] = df["CNPJ"].apply(validar_registro_ans)
-df["Valor_Valido"]        = df["Valor_Despesas"].apply(validar_valor_positivo)
-df["Validacao_OK"]        = df["Registro_ANS_Valido"] & df["Valor_Valido"]
+df["Registro_ANS_Valido"]  = df["CNPJ"].apply(validar_registro_ans)
+df["Valor_Valido"]         = df["ValorDespesas"].apply(validar_valor_positivo)
+df["RazaoSocial_Valida"]   = df["RazaoSocial"].notna() & (df["RazaoSocial"].astype(str).str.strip() != "")
+df["Validacao_OK"]         = df["Registro_ANS_Valido"] & df["Valor_Valido"]
 ```
 **Estratégias consideradas:**
 
@@ -173,6 +190,10 @@ df["Validacao_OK"]        = df["Registro_ANS_Valido"] & df["Valor_Valido"]
 - Não inventa dados (sem risco de silenciar erros)
 - Downstream pode filtrar ou tratar conforme necessidade específica
 - As flags são removidas após o enriquecimento (`remover_colunas_validacao`), mantendo o CSV final limpo
+
+**Nota sobre `RazaoSocial_Valida`:** O enunciado pede validação de "Razão Social não vazia". Como `RazaoSocial` vem sempre `NaN` do teste 1 (a fonte ANS não contém esse campo), essa validação falharia para todos os registros nesta etapa. A flag é implementada para auditoria, mas não entra em `Validacao_OK` — o campo é preenchido corretamente no enriquecimento (etapa 2) via cadastro ANS, e a flag é removida depois.
+
+**Nota sobre valores ≤ 0:** O teste 1 marca valores ≤ 0 como `Suspeito=True` mas os preserva, pois podem ser estornos válidos. Esta etapa marca `Valor_Valido=False` porque o enunciado pede explicitamente "valores numéricos positivos". As duas flags coexistem com significados diferentes: `Suspeito` é uma heurística do teste 1, `Valor_Valido` é a regra de negócio do teste 2.
 
 ---
 
@@ -248,14 +269,25 @@ def resolver_colunas_duplicadas(df):
 ---
 
 ### 6. Agregação em Memória (pandas groupby)
-**Decisão**: Agregar diretamente com `groupby` do pandas, sem uso de banco de dados ou processamento em chunks.
+**Decisão**: Agregar diretamente com `groupby` do pandas, sem uso de banco de dados ou processamento em chunks. A agregação é feita em dois passos para calcular a média correta por trimestre.
 ```python
-agregados_df = df.groupby(["Razao_Social", "UF"], as_index=False).agg(
-    Total_Despesas            = ("Valor_Despesas", "sum"),
-    Media_Despesas_Trimestre  = ("Valor_Despesas", "mean"),
-    Desvio_Padrao_Despesas    = ("Valor_Despesas", "std")
+# Passo 1: soma por trimestre (agrega os múltiplos níveis de conta contábil)
+por_trimestre = df.groupby(["RazaoSocial", "UF", "Trimestre"], as_index=False, dropna=False).agg(
+    Soma_Trimestre=("ValorDespesas", "sum")
+)
+
+# Passo 2: agrega as somas trimestrais por operadora/UF
+agregados_df = por_trimestre.groupby(["RazaoSocial", "UF"], as_index=False, dropna=False).agg(
+    Total_Despesas            = ("Soma_Trimestre", "sum"),
+    Media_Despesas_Trimestre  = ("Soma_Trimestre", "mean"),
+    Desvio_Padrao_Despesas    = ("Soma_Trimestre", "std")
 )
 ```
+**Por quê dois passos?**
+- Os dados da ANS contêm múltiplos níveis de conta contábil por operadora/trimestre (ex: 464, 4641, 46411). O primeiro `groupby` soma todas essas linhas em um único valor por trimestre
+- Média e desvio padrão são calculados sobre as somas trimestrais, não sobre linhas individuais
+- `dropna=False` garante que operadoras sem match no cadastro (campos `NaN`) não sejam descartadas silenciosamente pela agregação
+
 **Estratégias consideradas:**
 
 | Estratégia | Pros | Contras |
@@ -274,7 +306,7 @@ agregados_df = df.groupby(["Razao_Social", "UF"], as_index=False).agg(
 ## Tratamento de Inconsistências
 
 ### Registros sem match no cadastro ANS
-**Solução**: Mantidos no resultado com campos do cadastro como `NaN` (consequência do LEFT JOIN).
+**Solução**: Mantidos no resultado com campos do cadastro como `NaN` (consequência do LEFT JOIN). A agregação usa `dropna=False` para não perder esses registros.
 
 **Por quê?** Descartar despesas válidas por ausência no cadastro significaria perda de dados financeiros auditáveis. O campo `NaN` já sinaliza a ausência.
 
@@ -306,11 +338,11 @@ def corrigir_cnpj_notacao_cientifica(df):
 
 | Coluna | Descrição |
 |--------|-----------|
-| Razao_Social | Nome da operadora (do cadastro ANS) |
+| RazaoSocial | Nome da operadora (do cadastro ANS) |
 | UF | Estado de registro |
 | Total_Despesas | Soma das despesas por operadora/UF |
-| Media_Despesas_Trimestre | Média por trimestre para cada operadora/UF |
-| Desvio_Padrao_Despesas | Desvio padrão das despesas (variabilidade) |
+| Media_Despesas_Trimestre | Média das somas trimestrais por operadora/UF |
+| Desvio_Padrao_Despesas | Desvio padrão das somas trimestrais (variabilidade entre trimestres) |
 
 Ordenado por `Total_Despesas` decrescente.
 

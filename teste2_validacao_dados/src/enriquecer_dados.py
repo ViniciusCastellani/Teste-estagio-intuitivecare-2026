@@ -230,7 +230,7 @@ def reorganizar_colunas(df):
         if col in df.columns:
             colunas_ordem.append(col)
     
-    for col in ['Valor_Despesas', 'Suspeito']:
+    for col in ['ValorDespesas', 'Suspeito']:
         if col in df.columns:
             colunas_ordem.append(col)
     
