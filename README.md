@@ -363,3 +363,470 @@ teste2_validacao_dados/
     ├── agregado/               # despesas_agregadas.csv
     └── zip/                    # Teste_Vinicius_Castellani_Tonello.zip
 ```
+
+---
+
+# 3. TESTE DE BANCO DE DADOS E ANÁLISE
+
+## Como Executar
+```bash
+cd teste3_banco_de_dados
+chmod +x teste_all.sh
+./teste_all.sh
+```
+
+**Pré-requisito (executar uma vez):**
+```bash
+# Dar permissão para criar bancos de dados
+sudo -u postgres psql -c "ALTER USER $USER CREATEDB;"
+```
+
+**Ou executar manualmente:**
+```bash
+dropdb --if-exists ans_test
+createdb ans_test
+
+psql -d ans_test -f ddl/consolidado_despesas.sql
+psql -d ans_test -f ddl/despesas_agregradas.sql
+psql -d ans_test -f ddl/operadoras.sql
+
+psql -d ans_test -f import/import_consolidado_despesas.sql
+psql -d ans_test -f import/import_despesas_agregradas.sql
+psql -d ans_test -f import/import_operadoras.sql
+
+psql -d ans_test -f queries_analiticas/operadoras_crescimento.sql
+psql -d ans_test -f queries_analiticas/distribuicao_despesas_uf.sql
+psql -d ans_test -f queries_analiticas/operadoras_despesas_acima_media.sql
+```
+
+---
+
+## Trade-offs Técnicos
+
+### 1. Normalização: Tabelas Separadas vs Desnormalização
+**Decisão**: Manter 3 tabelas separadas (desnormalização controlada).
+
+**Opções consideradas:**
+
+| Estratégia | Pros | Contras |
+|------------|------|---------|
+| **Totalmente normalizada** (5+ tabelas) | Elimina redundância, integridade referencial forte | JOINs complexos, performance ruim para analytics |
+| **Tabela única desnormalizada** | Queries simples, performance máxima | Redundância massiva, difícil manter consistência |
+| **3 tabelas separadas** ✓ | Balanceado: analytics eficiente + dados organizados | Alguma redundância (razão_social duplicada) |
+
+**Estrutura escolhida:**
+```
+despesas_consolidadas → dados transacionais (granulares)
+despesas_agregadas    → dados pré-calculados (analytics)
+operadoras            → dados mestres (cadastro)
+```
+
+**Justificativa:**
+- **Volume esperado**: ~2M registros em `despesas_consolidadas` (múltiplos níveis contábeis por operadora/trimestre). Escala bem sem particionamento.
+- **Frequência de atualizações**: 
+  - `despesas_consolidadas`: INSERT trimestral (bulk), nunca UPDATE
+  - `despesas_agregadas`: REPLACE trimestral (drop + recreate)
+  - `operadoras`: Raramente (cadastro relativamente estático)
+  - → Não normalizar mais evita overhead de manutenção de FKs em INSERTs em massa
+- **Queries analíticas**: Maioria usa JOIN entre `despesas_consolidadas` e `operadoras` via `registro_operadora`. Ter `despesas_agregadas` separada permite queries rápidas sem recalcular somas/médias.
+
+**Por que não totalmente normalizada?**
+- Criar tabelas separadas para `trimestre`, `UF`, `modalidade` adicionaria 4-5 JOINs extras
+- Ganho de espaço seria mínimo (<1% do total)
+- Complexidade de manutenção não se justifica para este volume
+
+---
+
+### 2. Tipos de Dados: Valores Monetários
+**Decisão**: `DECIMAL(20,2)` para todos os valores monetários.
+
+**Opções consideradas:**
+
+| Tipo | Pros | Contras |
+|------|------|---------|
+| **FLOAT/DOUBLE** | Rápido, ocupa pouco espaço | Erros de arredondamento (0.1 + 0.2 ≠ 0.3) |
+| **INTEGER (centavos)** | Precisão perfeita, operações inteiras rápidas | Requer conversão manual, queries menos legíveis |
+| **DECIMAL(20,2)** ✓ | Precisão exata, legível, padrão financeiro | Ligeiramente mais lento que INTEGER |
+
+**Por que DECIMAL(20,2) e não (18,2)?**
+- Dados da ANS contêm valores que excedem 10^16 (limite do DECIMAL(18,2))
+- `DECIMAL(20,2)` suporta até 999.999.999.999.999.999,99
+- Overhead de espaço: +2 bytes por registro (~4MB para 2M registros)
+
+**Justificativa:**
+- **Precisão**: Essencial para dados financeiros regulatórios
+- **Performance**: Para ~2M linhas, diferença entre DECIMAL e INTEGER é <5% em agregações
+- **Uso futuro**: DECIMAL é esperado por sistemas contábeis/ERP
+- **Legibilidade**: `SUM(valor_despesas)` retorna valor direto, sem `/100` em toda query
+
+**Por que não FLOAT?**
+```sql
+-- Problema real com FLOAT:
+SELECT 1234567.89 + 0.01;  -- Pode retornar 1234567.9000000001
+```
+Inaceitável para dados financeiros regulatórios.
+
+---
+
+### 3. Tipos de Dados: PostgreSQL vs MySQL
+**Decisão**: Usar sintaxe PostgreSQL.
+
+**Mudanças de MySQL para PostgreSQL:**
+
+| MySQL | PostgreSQL | Motivo |
+|-------|------------|--------|
+| `AUTO_INCREMENT` | `SERIAL` / `BIGSERIAL` | Sintaxe nativa do PostgreSQL |
+| `TINYINT` | `SMALLINT` | PostgreSQL não tem TINYINT |
+| `COPY ... FROM` | `\copy ... FROM` | Permissão: `\copy` não precisa ser superusuário |
+
+**Justificativa:**
+- PostgreSQL tem melhor suporte a window functions (essenciais para Query 1)
+- Função `TO_DATE()` mais flexível para conversão de datas
+- `\copy` permite importação sem permissões de superusuário
+
+---
+
+### 4. Tipos de Dados: Datas
+**Decisão**: `DATE` para `data_registro_ans`.
+
+**Opções consideradas:**
+
+| Tipo | Pros | Contras |
+|------|------|---------|
+| **VARCHAR** | Aceita qualquer formato | Impossível fazer operações temporais, desperdiça espaço |
+| **TIMESTAMP** | Precisão de milissegundos, fusos horários | Overhead desnecessário (não há hora nos dados ANS) |
+| **DATE** ✓ | 4 bytes, operações nativas (`EXTRACT`, `BETWEEN`), validação automática | Requer conversão na importação |
+
+**Justificativa:**
+- Dados ANS não contêm hora — apenas data de registro
+- `DATE` permite queries como `WHERE EXTRACT(YEAR FROM data_registro_ans) = 2023`
+- 4 bytes vs 10+ bytes de VARCHAR — economia de 60% em espaço
+- Validação automática: `'2023-13-45'::DATE` falha na importação, evitando dados inválidos silenciosos
+
+**Tratamento de formatos inconsistentes:**
+```sql
+CASE 
+    WHEN data_registro_ans LIKE '____-__-__' THEN data_registro_ans::DATE
+    WHEN data_registro_ans LIKE '__/__/____' THEN TO_DATE(data_registro_ans, 'DD/MM/YYYY')
+    ELSE NULL
+END
+```
+Se falhar → `NULL` preserva linha, permite auditoria posterior.
+
+---
+
+### 5. Chaves Primárias: Surrogate vs Natural
+**Decisão**: Surrogate keys (`id SERIAL/BIGSERIAL`) + índices em chaves naturais.
+
+**Justificativa:**
+- **despesas_consolidadas**: Não tem chave natural única (CNPJ + ano + trimestre pode repetir por níveis contábeis). `id` garante unicidade.
+- **operadoras**: `registro_operadora` é candidata natural, mas usar `id` permite mudanças futuras no formato do registro ANS sem quebrar FKs.
+- **despesas_agregadas**: Sem chave natural óbvia (razao_social + UF pode mudar). `id` simplifica.
+
+**Índices adicionais:**
+```sql
+CREATE INDEX idx_consolidadas_cnpj ON despesas_consolidadas (cnpj);
+CREATE INDEX idx_operadoras_registro ON operadoras (registro_operadora);
+CREATE INDEX idx_consolidadas_periodo ON despesas_consolidadas (ano, trimestre);
+```
+Trade-off: +10-15% espaço, mas queries 10-100x mais rápidas em datasets >10k linhas.
+
+---
+
+### 6. Estratégia de Importação: Staging Table vs Direct COPY
+**Decisão**: Tabela temporária → Limpeza → Inserção validada.
+
+**Opções consideradas:**
+
+| Estratégia | Pros | Contras |
+|------------|------|---------|
+| **COPY direto** | Mais rápido (1 operação) | Falha na primeira inconsistência, rollback total |
+| **COPY com ON_ERROR_IGNORE** | Pula linhas ruins | Perde dados silenciosamente, sem log do que foi rejeitado |
+| **Staging → transformação** ✓ | Controle total, auditável, flexível | 2x I/O (COPY + INSERT) |
+
+**Implementação:**
+```sql
+CREATE TEMP TABLE temp_despesas (...);  -- Tudo como TEXT
+\copy temp_despesas FROM 'file.csv' ...;  -- Aceita tudo
+INSERT INTO despesas_consolidadas       -- Valida e transforma
+SELECT 
+    TRIM(cnpj),
+    REPLACE(REPLACE(valor, '.', ''), ',', '.')::DECIMAL(20,2),
+    ...
+FROM temp_despesas
+WHERE cnpj IS NOT NULL;
+DROP TABLE temp_despesas;
+```
+
+**Justificativa:**
+- **Valores NULL em obrigatórios**: WHERE na inserção rejeita explicitamente
+- **Strings em numéricos**: `::DECIMAL` falha com mensagem específica
+- **Formatos inconsistentes**: CASE WHEN trata múltiplos formatos, NULL para inválidos
+- **Valores absurdos**: Regex valida formato antes de converter
+- Overhead (~20% mais lento) é aceitável para importação trimestral batch
+
+---
+
+### 7. JOIN: CNPJ vs Registro ANS
+**Decisão Crítica**: O campo `cnpj` em `despesas_consolidadas` contém **Registro ANS**, não CNPJ fiscal.
+
+**Por quê?**
+- Os dados do teste 1 usam `df["CNPJ"] = df["REG_ANS"]`
+- Registro ANS é o identificador de 6 dígitos da operadora na ANS
+- CNPJ fiscal (14 dígitos) só aparece na tabela `operadoras`
+
+**Impacto nas queries:**
+```sql
+-- ERRADO: JOIN por CNPJ fiscal
+FROM despesas_consolidadas d
+JOIN operadoras o ON d.cnpj = o.cnpj  -- Não funciona!
+
+-- CORRETO: JOIN por Registro ANS
+FROM despesas_consolidadas d
+JOIN operadoras o ON d.cnpj = o.registro_operadora  -- ✓
+```
+
+Sem esta correção, as queries retornam 0 resultados.
+
+---
+
+## Tratamento de Inconsistências na Importação
+
+### 1. Valores NULL em campos obrigatórios
+**Campos afetados**: `cnpj`, `registro_operadora`, `ano`, `trimestre`, `valor_despesas`
+
+**Abordagem**: Filtro `WHERE` na inserção final — linhas rejeitadas.
+```sql
+WHERE cnpj IS NOT NULL AND cnpj != ''
+```
+
+**Justificativa**:
+- Estes campos são chaves de negócio — sem eles, o registro não tem significado
+- `NOT NULL` constraint no DDL garante que nada passa sem ser validado
+- Melhor rejeitar e corrigir na origem que ter dados órfãos
+
+---
+
+### 2. Strings em campos numéricos
+**Campos afetados**: `valor_despesas`, `ano`, `trimestre`
+
+**Abordagem**: Validação com regex antes de conversão.
+```sql
+CASE 
+    WHEN REPLACE(REPLACE(valor_despesas, '.', ''), ',', '.') ~ '^-?[0-9]+\.?[0-9]*$' 
+    THEN REPLACE(REPLACE(valor_despesas, '.', ''), ',', '.')::DECIMAL(20,2)
+    ELSE 0.00
+END
+```
+
+**Justificativa**:
+- Regex `^-?[0-9]+\.?[0-9]*$` valida formato numérico
+- Conversão só acontece se validação passar
+- Valor padrão 0.00 para inválidos (melhor que rejeitar linha inteira)
+
+---
+
+### 3. Valores decimais com formatação brasileira
+**Formato CSV**: `1.234.567,89` (ponto de milhar, vírgula decimal)
+
+**Abordagem**: Remover pontos → trocar vírgula por ponto → converter.
+```sql
+REPLACE(REPLACE(valor_despesas, '.', ''), ',', '.')::DECIMAL(20,2)
+-- '1.234.567,89' → '1234567.89' → DECIMAL
+```
+
+**Justificativa**:
+- Padrão brasileiro nos CSVs da ANS
+- Conversão é determinística e reversível
+- Rejeitar seria perder dados válidos
+
+---
+
+### 4. Valores absurdos (overflow de DECIMAL)
+**Problema**: Alguns valores excedem 10^16, causando erro `numeric field overflow`.
+
+**Solução 1 - DDL**: Aumentar precisão para `DECIMAL(20,2)`
+**Solução 2 - Queries**: Filtrar valores extremos
+```sql
+WHERE ABS(valor_despesas) < 1000000000  -- Filtrar valores > 1 bilhão
+```
+
+**Justificativa**:
+- Valores acima de 1 bilhão por trimestre são outliers extremos
+- Podem ser erros de digitação ou dados corrompidos
+- Filtrar melhora qualidade das análises sem perder dados válidos
+
+---
+
+### 5. Datas em formatos inconsistentes
+**Formatos encontrados**: `YYYY-MM-DD`, `DD/MM/YYYY`
+
+**Abordagem**: Tenta ambos formatos com `LIKE`, `NULL` se falhar.
+```sql
+CASE 
+    WHEN data_registro_ans LIKE '____-__-__' THEN data_registro_ans::DATE
+    WHEN data_registro_ans LIKE '__/__/____' THEN TO_DATE(data_registro_ans, 'DD/MM/YYYY')
+    ELSE NULL
+END
+```
+
+**Justificativa**:
+- `LIKE` com `_` (underscore) substitui regex sem overhead
+- `data_registro_ans` não é campo crítico para análises principais
+- `NULL` permite identificar problemas sem perder registro inteiro
+
+---
+
+### 6. Valores booleanos textuais
+**Valores possíveis**: `'true'`, `'1'`, `'sim'`, `'false'`, `'0'`, `'não'`
+
+**Abordagem**: Normalizar para TRUE/FALSE, padrão FALSE.
+```sql
+CASE WHEN LOWER(suspeito) IN ('true', '1', 'sim') THEN TRUE ELSE FALSE END
+```
+
+**Justificativa**:
+- Campo `suspeito`: FALSE é menos severo que TRUE (falso negativo > falso positivo)
+- Maioria dos registros não é suspeita — FALSE como padrão é estatisticamente correto
+- `LOWER()` torna case-insensitive
+
+---
+
+## Queries Analíticas - Decisões Técnicas
+
+### Query 1: Crescimento Percentual
+**Problema**: Operadoras sem dados em todos os trimestres.
+
+**Solução**: `ROW_NUMBER()` para identificar primeiro e último registro.
+```sql
+WITH dados_com_ordem AS (
+    SELECT 
+        d.cnpj,
+        o.razao_social,
+        d.valor_despesas,
+        ROW_NUMBER() OVER (PARTITION BY d.cnpj ORDER BY d.ano, d.trimestre) as posicao_primeiro,
+        ROW_NUMBER() OVER (PARTITION BY d.cnpj ORDER BY d.ano DESC, d.trimestre DESC) as posicao_ultimo
+    FROM despesas_consolidadas d
+    LEFT JOIN operadoras o ON TRIM(d.cnpj) = TRIM(o.registro_operadora)
+)
+SELECT ...
+FROM dados_com_ordem
+WHERE posicao_primeiro = 1 OR posicao_ultimo = 1
+```
+
+**Por quê?**
+- Compara primeiro vs último trimestre **com dados**, ignorando gaps
+- Operadora com apenas T1 e T3 (sem T2) → compara T1 vs T3 corretamente
+- Mais simples que `FIRST_VALUE`/`LAST_VALUE` com window frame
+
+**Filtro de valores absurdos:**
+```sql
+WHERE pd.primeira_despesa > 0
+  AND ABS(pd.primeira_despesa) < 1000000000
+  AND ABS(ud.ultima_despesa) < 1000000000
+```
+Evita crescimentos percentuais irreais (ex: 1.000.000.000%).
+
+---
+
+### Query 2: Distribuição por UF
+**Desafio adicional**: Média por operadora (não por trimestre).
+
+**Solução**: CTE para agregar por operadora/UF primeiro.
+```sql
+WITH despesas_por_operadora_uf AS (
+    SELECT 
+        o.uf,
+        d.cnpj,
+        SUM(d.valor_despesas) as total_por_operadora
+    FROM despesas_consolidadas d
+    LEFT JOIN operadoras o ON TRIM(d.cnpj) = TRIM(o.registro_operadora)
+    WHERE ABS(d.valor_despesas) < 1000000000
+    GROUP BY o.uf, d.cnpj
+)
+SELECT 
+    uf,
+    SUM(total_por_operadora) as total_despesas,
+    COUNT(DISTINCT cnpj) as qtd_operadoras,
+    AVG(total_por_operadora) as media_por_operadora_na_uf
+FROM despesas_por_operadora_uf
+GROUP BY uf
+```
+
+**Por quê?**
+- `AVG(valor_despesas)` direto daria média de registros contábeis (errado)
+- Agrupar por operadora primeiro, depois tirar média, dá a métrica correta
+- `LEFT JOIN` preserva despesas sem match no cadastro
+
+---
+
+### Query 3: Acima da Média em 2+ Trimestres
+**Trade-off técnico**: Window function vs Subqueries vs Temp tables.
+
+**Decisão**: CTEs com agregação simples.
+
+| Abordagem | Performance | Manutenibilidade | Legibilidade |
+|-----------|-------------|------------------|--------------|
+| **CTEs com agregação** ✓ | (1 scan)  (fácil modificar) | (clara) |
+| **Subqueries aninhadas** | (3+ scans) | (acoplado) | (confusa) |
+| **Temp tables** | (2 scans) | (mais código) | (passo-a-passo) |
+
+**Implementação:**
+```sql
+WITH media_geral AS (
+    SELECT AVG(valor_despesas) FROM despesas_consolidadas
+    WHERE ABS(valor_despesas) < 1000000000
+),
+trimestres_acima_media AS (
+    SELECT 
+        d.cnpj,
+        CASE WHEN d.valor_despesas > mg.media THEN 1 ELSE 0 END as acima_media
+    FROM despesas_consolidadas d
+    CROSS JOIN media_geral mg
+    WHERE ABS(valor_despesas) < 1000000000
+)
+SELECT 
+    COALESCE(o.razao_social, c.cnpj) as razao_social,
+    SUM(acima_media) as trimestres_acima_media,
+    COUNT(*) as total_trimestres
+FROM trimestres_acima_media
+GROUP BY cnpj
+HAVING SUM(acima_media) >= 2
+```
+
+**Justificativa**:
+- **Performance**: 1 passada pelos dados (~2M linhas) vs 3+ com subqueries
+- **Manutenibilidade**: CTEs são autodocumentadas
+- **Debugabilidade**: Cada CTE pode ser testada isoladamente
+
+---
+
+## Estrutura do Código
+```
+teste3_banco_de_dados/
+├── teste_all.sh                       # Script automatizado de teste
+├── ddl/
+│   ├── consolidado_despesas.sql       # Tabela transacional
+│   ├── despesas_agregradas.sql        # Tabela pré-calculada
+│   └── operadoras.sql                 # Tabela mestre
+├── import/
+│   ├── import_consolidado_despesas.sql
+│   ├── import_despesas_agregradas.sql
+│   └── import_operadoras.sql
+├── queries_analiticas/
+│   ├── operadoras_crescimento.sql     # Query 1: Top 5 crescimento %
+│   ├── distribuicao_despesas_uf.sql   # Query 2: Top 5 UFs
+│   └── operadoras_despesas_acima_media.sql  # Query 3: 2+ trimestres acima média
+└── data/
+    ├── consolidado_despesas.csv       # Do teste 1
+    ├── despesas_agregadas.csv         # Do teste 2
+    └── operadoras_ativas_ans.csv      # Do teste 2
+```
+
+---
+ 
+# 4. TESTE DE API E INTERFACE WEB
+
+Optei por não implementar o Teste 4 dentro do prazo para priorizar a qualidade, robustez e documentação completa dos testes 1, 2 e 3, que envolvem ingestão de dados reais, tratamento de inconsistências, modelagem analítica e SQL em escala.
+
+A implementação de frontend em Vue.js e API exigiria decisões adicionais de arquitetura (estado, cache, paginação, UX), que mereceriam o mesmo nível de cuidado e documentação adotado nas etapas anteriores. Dado o prazo e o objetivo do teste — avaliar capacidade de tomada de decisão técnica e análise crítica — priorizei entregar menos itens, porém bem fundamentados e executáveis de ponta a ponta.

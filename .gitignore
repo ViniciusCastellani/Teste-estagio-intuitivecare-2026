@@ -206,3 +206,6 @@ marimo/_static/
 marimo/_lsp/
 __marimo__/
 teste2_validacao_dados/data/enriquecido/dados_enriquecidos.csv
+
+# Dotenv
+.env
